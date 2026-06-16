@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Production builds
+frontend/dist/
+backend/public/
+
+# Local database
+*.sqlite
+backend/database.sqlite
+
+# Temp files and uploads
+backend/uploads/
+uploads/
+
+# Env config
+.env
+backend/.env
+frontend/.env
