@@ -18,7 +18,7 @@ function App() {
   useEffect(() => {
     if (token) {
       setIsLoading(true);
-      fetch('/api/auth/verify', {
+      fetch((import.meta.env.VITE_API_URL || '') + '/api/auth/verify', {
         headers: { Authorization: `Bearer ${token}` }
       })
         .then((res) => {
@@ -63,7 +63,7 @@ function App() {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const response = await fetch(url, {
+    const response = await fetch((import.meta.env.VITE_API_URL || '') + url, {
       ...options,
       headers
     });

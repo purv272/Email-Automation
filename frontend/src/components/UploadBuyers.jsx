@@ -85,7 +85,7 @@ function UploadBuyers({ apiFetch }) {
     try {
       // Direct fetch for multipart
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/buyers/upload', {
+      const response = await fetch((import.meta.env.VITE_API_URL || '') + '/api/buyers/upload', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`
