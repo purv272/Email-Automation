@@ -1,4 +1,5 @@
 import sqlite3 from 'sqlite3';
+import pg from 'pg';
 import bcrypt from 'bcryptjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,41 +7,105 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = path.resolve(__dirname, 'database.sqlite');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to the SQLite database.');
-  }
-});
+// Check if PostgreSQL connection string is provided
+const usePostgres = !!process.env.DATABASE_URL;
+
+let pool = null;
+let db = null;
+
+if (usePostgres) {
+  console.log('Using PostgreSQL Database (Production Mode)');
+  pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false // Required for hosted databases like Neon/Supabase
+    }
+  });
+} else {
+  console.log('Using SQLite Database (Development Mode)');
+  const dbPath = path.resolve(__dirname, 'database.sqlite');
+  db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('Error opening SQLite database:', err.message);
+    } else {
+      console.log('Connected to the SQLite database.');
+    }
+  });
+}
+
+// Convert SQLite '?' parameters to PostgreSQL '$1, $2...'
+const convertQuery = (sql) => {
+  if (!usePostgres) return sql;
+  let index = 1;
+  return sql.replace(/\?/g, () => `$${index++}`);
+};
+
+// Translate SQLite table creation syntax to PostgreSQL
+const translateSql = (sql) => {
+  if (!usePostgres) return sql;
+  let pgSql = sql;
+  // Replace auto-increment syntax
+  pgSql = pgSql.replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY');
+  return pgSql;
+};
 
 // Promisify database actions for modern async/await syntax
-export const dbQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
+export const dbQuery = async (sql, params = []) => {
+  if (usePostgres) {
+    const pgSql = convertQuery(sql);
+    const res = await pool.query(pgSql, params);
+    return res.rows;
+  } else {
+    return new Promise((resolve, reject) => {
+      db.all(sql, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
     });
-  });
+  }
 };
 
-export const dbGet = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
+export const dbGet = async (sql, params = []) => {
+  if (usePostgres) {
+    const pgSql = convertQuery(sql);
+    const res = await pool.query(pgSql, params);
+    return res.rows.length > 0 ? res.rows[0] : null;
+  } else {
+    return new Promise((resolve, reject) => {
+      db.get(sql, params, (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
     });
-  });
+  }
 };
 
-export const dbRun = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve({ id: this.lastID, changes: this.changes });
+export const dbRun = async (sql, params = []) => {
+  if (usePostgres) {
+    let finalSql = translateSql(sql);
+    const isInsert = finalSql.trim().toUpperCase().startsWith('INSERT');
+    
+    // Append RETURNING id if it's an INSERT and doesn't already have it, 
+    // excluding campaign_buyers and settings which don't have an auto-increment id column.
+    if (isInsert && !finalSql.toUpperCase().includes('RETURNING')) {
+      if (!finalSql.includes('campaign_buyers') && !finalSql.includes('settings')) {
+        finalSql += ' RETURNING id';
+      }
+    }
+
+    const pgSql = convertQuery(finalSql);
+    const res = await pool.query(pgSql, params);
+    const lastID = res.rows.length > 0 ? res.rows[0].id : null;
+    
+    return { id: lastID, changes: res.rowCount };
+  } else {
+    return new Promise((resolve, reject) => {
+      db.run(sql, params, function (err) {
+        if (err) reject(err);
+        else resolve({ id: this.lastID, changes: this.changes });
+      });
     });
-  });
+  }
 };
 
 // Database Initialization
