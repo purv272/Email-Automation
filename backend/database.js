@@ -21,6 +21,11 @@ if (usePostgres) {
       rejectUnauthorized: false // Required for hosted databases like Neon/Supabase
     }
   });
+  
+  // Add error event handler to prevent idle client crashes
+  pool.on('error', (err) => {
+    console.error('Unexpected error on idle PostgreSQL client:', err);
+  });
 } else {
   console.log('Using SQLite Database (Development Mode)');
   const dbPath = path.resolve(__dirname, 'database.sqlite');
