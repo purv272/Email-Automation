@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import csv from 'csv-parser';
 import xlsx from 'xlsx';
-import { dbQuery, dbGet, dbRun } from '../database.js';
+import { Buyer } from '../database.js';
 import { authenticateToken } from './auth.js';
 import { classifyBuyer } from '../aiService.js';
 
@@ -27,7 +27,7 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname).toLowerCase());
   }
 });
 
@@ -50,30 +50,27 @@ router.use(authenticateToken);
 router.get('/', async (req, res) => {
   const { search, country, status, followup_status } = req.query;
 
-  let query = 'SELECT * FROM buyers WHERE 1=1';
-  const params = [];
+  const filter = {};
 
   if (search) {
-    query += ' AND (company_name LIKE ? OR email LIKE ? OR product_interest LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    filter.$or = [
+      { company_name: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+      { product_interest: { $regex: search, $options: 'i' } }
+    ];
   }
   if (country) {
-    query += ' AND country = ?';
-    params.push(country);
+    filter.country = country;
   }
   if (status) {
-    query += ' AND status = ?';
-    params.push(status);
+    filter.status = status;
   }
   if (followup_status) {
-    query += ' AND followup_status = ?';
-    params.push(followup_status);
+    filter.followup_status = followup_status;
   }
 
-  query += ' ORDER BY id DESC';
-
   try {
-    const buyers = await dbQuery(query, params);
+    const buyers = await Buyer.find(filter).sort({ _id: -1 });
     res.json(buyers);
   } catch (error) {
     console.error('Error fetching buyers:', error);
@@ -91,17 +88,21 @@ router.post('/', async (req, res) => {
 
   try {
     // Check if duplicate
-    const existing = await dbGet('SELECT * FROM buyers WHERE email = ?', [email]);
+    const existing = await Buyer.findOne({ email: email.toLowerCase().trim() });
     if (existing) {
       return res.status(400).json({ error: 'A buyer with this email address already exists.' });
     }
 
-    const result = await dbRun(`
-      INSERT INTO buyers (company_name, email, country, website, product_interest, status, followup_status)
-      VALUES (?, ?, ?, ?, ?, 'Imported', 'None')
-    `, [company_name, email, country || '', website || '', product_interest || '']);
+    const newBuyer = await Buyer.create({
+      company_name: company_name.trim(),
+      email: email.toLowerCase().trim(),
+      country: country || '',
+      website: website || '',
+      product_interest: product_interest || '',
+      status: 'Imported',
+      followup_status: 'None'
+    });
 
-    const newBuyer = await dbGet('SELECT * FROM buyers WHERE id = ?', [result.id]);
     res.status(201).json(newBuyer);
   } catch (error) {
     console.error('Error creating buyer:', error);
@@ -120,18 +121,29 @@ router.put('/:id', async (req, res) => {
 
   try {
     // Check if email is already taken by another buyer
-    const existing = await dbGet('SELECT * FROM buyers WHERE email = ? AND id != ?', [email, id]);
+    const existing = await Buyer.findOne({ email: email.toLowerCase().trim(), _id: { $ne: id } });
     if (existing) {
       return res.status(400).json({ error: 'Another buyer already has this email address.' });
     }
 
-    await dbRun(`
-      UPDATE buyers 
-      SET company_name = ?, email = ?, country = ?, website = ?, product_interest = ?, status = ?, followup_status = ?
-      WHERE id = ?
-    `, [company_name, email, country, website, product_interest, status, followup_status, id]);
+    const updated = await Buyer.findByIdAndUpdate(
+      id,
+      {
+        company_name: company_name.trim(),
+        email: email.toLowerCase().trim(),
+        country: country || '',
+        website: website || '',
+        product_interest: product_interest || '',
+        status: status || 'Imported',
+        followup_status: followup_status || 'None'
+      },
+      { new: true }
+    );
 
-    const updated = await dbGet('SELECT * FROM buyers WHERE id = ?', [id]);
+    if (!updated) {
+      return res.status(404).json({ error: 'Buyer not found.' });
+    }
+
     res.json(updated);
   } catch (error) {
     console.error('Error updating buyer:', error);
@@ -143,7 +155,10 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    await dbRun('DELETE FROM buyers WHERE id = ?', [id]);
+    const deleted = await Buyer.findByIdAndDelete(id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Buyer not found.' });
+    }
     res.json({ message: 'Buyer deleted successfully.' });
   } catch (error) {
     console.error('Error deleting buyer:', error);
@@ -258,16 +273,21 @@ router.post('/import', async (req, res) => {
 
       try {
         // Query to check duplicate email
-        const existing = await dbGet('SELECT id FROM buyers WHERE email = ?', [trimmedEmail]);
+        const existing = await Buyer.findOne({ email: trimmedEmail });
         if (existing) {
           duplicateCount++;
           continue;
         }
 
-        await dbRun(`
-          INSERT INTO buyers (company_name, email, country, website, product_interest, status, followup_status)
-          VALUES (?, ?, ?, ?, ?, 'Imported', 'None')
-        `, [companyName.trim(), trimmedEmail, country ? country.toString().trim() : '', website ? website.toString().trim() : '', productInterest ? productInterest.toString().trim() : '']);
+        await Buyer.create({
+          company_name: companyName.trim(),
+          email: trimmedEmail,
+          country: country ? country.toString().trim() : '',
+          website: website ? website.toString().trim() : '',
+          product_interest: productInterest ? productInterest.toString().trim() : '',
+          status: 'Imported',
+          followup_status: 'None'
+        });
 
         importCount++;
       } catch (err) {
@@ -297,7 +317,7 @@ router.post('/import', async (req, res) => {
 router.post('/:id/classify', async (req, res) => {
   const { id } = req.params;
   try {
-    const buyer = await dbGet('SELECT * FROM buyers WHERE id = ?', [id]);
+    const buyer = await Buyer.findById(id);
     if (!buyer) return res.status(404).json({ error: 'Buyer not found.' });
 
     const classification = await classifyBuyer(buyer.company_name, buyer.product_interest);

@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { dbQuery, dbGet, dbRun } from '../database.js';
+import { Setting } from '../database.js';
 import { authenticateToken } from './auth.js';
 import { verifySmtp } from '../scheduler.js';
 
@@ -42,7 +42,7 @@ router.use(authenticateToken);
 // 1. Get all settings as a key-value object
 router.get('/', async (req, res) => {
   try {
-    const rows = await dbQuery('SELECT * FROM settings');
+    const rows = await Setting.find();
     const settings = {};
     rows.forEach((row) => {
       settings[row.key] = row.value;
@@ -63,12 +63,11 @@ router.post('/', async (req, res) => {
       // Convert to string for storage
       const valStr = typeof value === 'object' ? JSON.stringify(value) : (value !== null && value !== undefined ? value.toString() : '');
       
-      const exists = await dbGet('SELECT * FROM settings WHERE key = ?', [key]);
-      if (exists) {
-        await dbRun('UPDATE settings SET value = ? WHERE key = ?', [valStr, key]);
-      } else {
-        await dbRun('INSERT INTO settings (key, value) VALUES (?, ?)', [key, valStr]);
-      }
+      await Setting.findOneAndUpdate(
+        { key },
+        { value: valStr },
+        { upsert: true, new: true }
+      );
     }
     res.json({ message: 'Settings saved successfully.' });
   } catch (error) {
@@ -109,7 +108,7 @@ router.post('/upload-attachment', upload.single('file'), async (req, res) => {
 
   try {
     // Fetch current default attachments list
-    const currentSettingsRow = await dbGet("SELECT value FROM settings WHERE key = 'default_attachments'");
+    const currentSettingsRow = await Setting.findOne({ key: 'default_attachments' });
     let attachmentsList = [];
     if (currentSettingsRow && currentSettingsRow.value) {
       attachmentsList = JSON.parse(currentSettingsRow.value);
@@ -119,12 +118,11 @@ router.post('/upload-attachment', upload.single('file'), async (req, res) => {
 
     // Save back to settings
     const valStr = JSON.stringify(attachmentsList);
-    const exists = await dbGet("SELECT * FROM settings WHERE key = 'default_attachments'");
-    if (exists) {
-      await dbRun("UPDATE settings SET value = ? WHERE key = 'default_attachments'", [valStr]);
-    } else {
-      await dbRun("INSERT INTO settings (key, value) VALUES ('default_attachments', ?)", [valStr]);
-    }
+    await Setting.findOneAndUpdate(
+      { key: 'default_attachments' },
+      { value: valStr },
+      { upsert: true, new: true }
+    );
 
     res.json({
       message: 'Attachment uploaded successfully.',
@@ -147,7 +145,7 @@ router.delete('/attachment/:id', async (req, res) => {
   const { id } = req.params;
 
   try {
-    const currentSettingsRow = await dbGet("SELECT value FROM settings WHERE key = 'default_attachments'");
+    const currentSettingsRow = await Setting.findOne({ key: 'default_attachments' });
     if (!currentSettingsRow || !currentSettingsRow.value) {
       return res.status(404).json({ error: 'No attachments found.' });
     }
@@ -169,7 +167,10 @@ router.delete('/attachment/:id', async (req, res) => {
 
     // Remove from array and save settings
     attachmentsList.splice(targetIndex, 1);
-    await dbRun("UPDATE settings SET value = ? WHERE key = 'default_attachments'", [JSON.stringify(attachmentsList)]);
+    await Setting.findOneAndUpdate(
+      { key: 'default_attachments' },
+      { value: JSON.stringify(attachmentsList) }
+    );
 
     res.json({
       message: 'Attachment deleted successfully.',

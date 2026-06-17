@@ -1,220 +1,103 @@
-import sqlite3 from 'sqlite3';
-import pg from 'pg';
+import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || 'mongodb://127.0.0.1:27017/email-automation';
 
-// Check if PostgreSQL connection string is provided
-const usePostgres = !!process.env.DATABASE_URL;
+// 1. User Schema
+const UserSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
+});
 
-let pool = null;
-let db = null;
+// 2. Setting Schema
+const SettingSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  value: { type: String, default: '' }
+});
 
-if (usePostgres) {
-  console.log('Using PostgreSQL Database (Production Mode)');
-  pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false // Required for hosted databases like Neon/Supabase
-    }
-  });
-  
-  // Add error event handler to prevent idle client crashes
-  pool.on('error', (err) => {
-    console.error('Unexpected error on idle PostgreSQL client:', err);
-  });
-} else {
-  console.log('Using SQLite Database (Development Mode)');
-  const dbPath = path.resolve(__dirname, 'database.sqlite');
-  db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-      console.error('Error opening SQLite database:', err.message);
-    } else {
-      console.log('Connected to the SQLite database.');
-    }
-  });
-}
+// 3. Buyer Schema
+const BuyerSchema = new mongoose.Schema({
+  company_name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  country: { type: String, default: '' },
+  website: { type: String, default: '' },
+  product_interest: { type: String, default: '' },
+  status: { type: String, default: 'Imported' },
+  date_sent: { type: String, default: null },
+  followup_status: { type: String, default: 'None' }
+});
 
-// Convert SQLite '?' parameters to PostgreSQL '$1, $2...'
-const convertQuery = (sql) => {
-  if (!usePostgres) return sql;
-  let index = 1;
-  return sql.replace(/\?/g, () => `$${index++}`);
-};
+// 4. Template Schema
+const TemplateSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  subject: { type: String, required: true },
+  body: { type: String, required: true },
+  created_at: { type: String, required: true }
+});
 
-// Translate SQLite table creation syntax to PostgreSQL
-const translateSql = (sql) => {
-  if (!usePostgres) return sql;
-  let pgSql = sql;
-  // Replace auto-increment syntax
-  pgSql = pgSql.replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY');
-  return pgSql;
-};
+// 5. Campaign Schema
+const CampaignSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  template_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Template', required: true },
+  status: { type: String, default: 'Draft' },
+  attachments: { type: Array, default: [] },
+  created_at: { type: String, required: true }
+});
 
-// Promisify database actions for modern async/await syntax
-export const dbQuery = async (sql, params = []) => {
-  if (usePostgres) {
-    const pgSql = convertQuery(sql);
-    const res = await pool.query(pgSql, params);
-    return res.rows;
-  } else {
-    return new Promise((resolve, reject) => {
-      db.all(sql, params, (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
-  }
-};
+// 6. Campaign Buyer Schema
+const CampaignBuyerSchema = new mongoose.Schema({
+  campaign_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Campaign', required: true },
+  buyer_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Buyer', required: true },
+  status: { type: String, default: 'Pending' },
+  sent_at: { type: String, default: null },
+  error_message: { type: String, default: null },
+  custom_subject: { type: String, default: null },
+  custom_body: { type: String, default: null },
+  followup_1_date: { type: String, default: null },
+  followup_1_status: { type: String, default: 'Pending' },
+  followup_2_date: { type: String, default: null },
+  followup_2_status: { type: String, default: 'Pending' }
+});
 
-export const dbGet = async (sql, params = []) => {
-  if (usePostgres) {
-    const pgSql = convertQuery(sql);
-    const res = await pool.query(pgSql, params);
-    return res.rows.length > 0 ? res.rows[0] : null;
-  } else {
-    return new Promise((resolve, reject) => {
-      db.get(sql, params, (err, row) => {
-        if (err) reject(err);
-        else resolve(row);
-      });
-    });
-  }
-};
+// Set compound index to simulate primary key behavior
+CampaignBuyerSchema.index({ campaign_id: 1, buyer_id: 1 }, { unique: true });
 
-export const dbRun = async (sql, params = []) => {
-  if (usePostgres) {
-    let finalSql = translateSql(sql);
-    const isInsert = finalSql.trim().toUpperCase().startsWith('INSERT');
-    
-    // Append RETURNING id if it's an INSERT and doesn't already have it, 
-    // excluding campaign_buyers and settings which don't have an auto-increment id column.
-    if (isInsert && !finalSql.toUpperCase().includes('RETURNING')) {
-      if (!finalSql.includes('campaign_buyers') && !finalSql.includes('settings')) {
-        finalSql += ' RETURNING id';
-      }
-    }
+// 7. Sent History Schema
+const SentHistorySchema = new mongoose.Schema({
+  buyer_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Buyer' },
+  campaign_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Campaign' },
+  email_address: { type: String, required: true },
+  company_name: { type: String, required: true },
+  subject: { type: String, required: true },
+  body: { type: String, required: true },
+  type: { type: String, required: true },
+  sent_at: { type: String, required: true },
+  status: { type: String, required: true },
+  error_message: { type: String, default: null }
+});
 
-    const pgSql = convertQuery(finalSql);
-    const res = await pool.query(pgSql, params);
-    const lastID = res.rows.length > 0 ? res.rows[0].id : null;
-    
-    return { id: lastID, changes: res.rowCount };
-  } else {
-    return new Promise((resolve, reject) => {
-      db.run(sql, params, function (err) {
-        if (err) reject(err);
-        else resolve({ id: this.lastID, changes: this.changes });
-      });
-    });
-  }
-};
+// Export Models
+export const User = mongoose.model('User', UserSchema);
+export const Setting = mongoose.model('Setting', SettingSchema);
+export const Buyer = mongoose.model('Buyer', BuyerSchema);
+export const Template = mongoose.model('Template', TemplateSchema);
+export const Campaign = mongoose.model('Campaign', CampaignSchema);
+export const CampaignBuyer = mongoose.model('CampaignBuyer', CampaignBuyerSchema);
+export const SentHistory = mongoose.model('SentHistory', SentHistorySchema);
 
-// Database Initialization
+// Database Initialization & Connection
 export const initDatabase = async () => {
   try {
-    // 1. Users table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL
-      )
-    `);
+    console.log(`Connecting to MongoDB at: ${MONGODB_URI.replace(/:([^:@]+)@/, ':****@')}`);
+    await mongoose.connect(MONGODB_URI);
+    console.log('Connected to MongoDB successfully.');
 
-    // 2. Settings table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      )
-    `);
-
-    // 3. Buyers table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS buyers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        company_name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        country TEXT,
-        website TEXT,
-        product_interest TEXT,
-        status TEXT DEFAULT 'Imported',
-        date_sent TEXT,
-        followup_status TEXT DEFAULT 'None'
-      )
-    `);
-
-    // 4. Templates table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS templates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        body TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-
-    // 5. Campaigns table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS campaigns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        template_id INTEGER,
-        status TEXT DEFAULT 'Draft',
-        attachments TEXT DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (template_id) REFERENCES templates(id)
-      )
-    `);
-
-    // 6. Campaign Buyers relation table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS campaign_buyers (
-        campaign_id INTEGER,
-        buyer_id INTEGER,
-        status TEXT DEFAULT 'Pending',
-        sent_at TEXT,
-        error_message TEXT,
-        custom_subject TEXT,
-        custom_body TEXT,
-        followup_1_date TEXT,
-        followup_1_status TEXT DEFAULT 'Pending',
-        followup_2_date TEXT,
-        followup_2_status TEXT DEFAULT 'Pending',
-        PRIMARY KEY (campaign_id, buyer_id),
-        FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
-        FOREIGN KEY (buyer_id) REFERENCES buyers(id) ON DELETE CASCADE
-      )
-    `);
-
-    // 7. Sent History table
-    await dbRun(`
-      CREATE TABLE IF NOT EXISTS sent_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyer_id INTEGER,
-        campaign_id INTEGER,
-        email_address TEXT NOT NULL,
-        company_name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        body TEXT NOT NULL,
-        type TEXT NOT NULL,
-        sent_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error_message TEXT
-      )
-    `);
-
-    // Setup Default Admin User
-    const adminExists = await dbGet('SELECT * FROM users WHERE username = ?', ['admin']);
+    // Setup Default Admin User if it doesn't exist
+    const adminExists = await User.findOne({ username: 'admin' });
     if (!adminExists) {
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash('admin123', salt);
-      await dbRun('INSERT INTO users (username, password) VALUES (?, ?)', ['admin', hashedPassword]);
+      await User.create({ username: 'admin', password: hashedPassword });
       console.log('Default administrator account created: admin / admin123');
     }
 
@@ -236,16 +119,16 @@ export const initDatabase = async () => {
     };
 
     for (const [key, val] of Object.entries(defaultSettings)) {
-      const settingExists = await dbGet('SELECT * FROM settings WHERE key = ?', [key]);
+      const settingExists = await Setting.findOne({ key });
       if (!settingExists) {
-        await dbRun('INSERT INTO settings (key, value) VALUES (?, ?)', [key, val]);
+        await Setting.create({ key, value: val });
       }
     }
     console.log('Default settings checks completed.');
-
   } catch (error) {
-    console.error('Database initialization failed:', error);
+    console.error('MongoDB initialization failed:', error);
+    throw error;
   }
 };
 
-export default db;
+export default mongoose;

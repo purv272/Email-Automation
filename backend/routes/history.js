@@ -1,5 +1,5 @@
 import express from 'express';
-import { dbQuery, dbGet, dbRun } from '../database.js';
+import { Buyer, SentHistory, CampaignBuyer } from '../database.js';
 import { authenticateToken } from './auth.js';
 
 const router = express.Router();
@@ -9,36 +9,66 @@ router.use(authenticateToken);
 // Get dashboard statistics
 router.get('/stats', async (req, res) => {
   try {
-    const totalBuyers = await dbGet('SELECT COUNT(*) as count FROM buyers');
-    const totalSent = await dbGet("SELECT COUNT(*) as count FROM sent_history WHERE status = 'Success'");
-    const totalFailed = await dbGet("SELECT COUNT(*) as count FROM sent_history WHERE status = 'Failed'");
-    const pendingPrimary = await dbGet("SELECT COUNT(*) as count FROM campaign_buyers WHERE status = 'Pending'");
+    const totalBuyers = await Buyer.countDocuments();
+    const totalSent = await SentHistory.countDocuments({ status: 'Success' });
+    const totalFailed = await SentHistory.countDocuments({ status: 'Failed' });
+    const pendingPrimary = await CampaignBuyer.countDocuments({ status: 'Pending' });
     
-    const pendingFollowups = await dbGet(`
-      SELECT COUNT(*) as count FROM campaign_buyers cb
-      JOIN buyers b ON cb.buyer_id = b.id
-      WHERE (cb.followup_1_status = 'Pending' AND cb.followup_1_date IS NOT NULL) 
-         OR (cb.followup_2_status = 'Pending' AND cb.followup_2_date IS NOT NULL)
-         AND b.status != 'Replied'
-         AND b.followup_status != 'Stopped'
-    `);
+    const pendingFollowupsRes = await CampaignBuyer.aggregate([
+      {
+        $lookup: {
+          from: 'buyers',
+          localField: 'buyer_id',
+          foreignField: '_id',
+          as: 'buyer'
+        }
+      },
+      { $unwind: '$buyer' },
+      {
+        $match: {
+          $and: [
+            {
+              $or: [
+                { followup_1_status: 'Pending', followup_1_date: { $ne: null } },
+                { followup_2_status: 'Pending', followup_2_date: { $ne: null } }
+              ]
+            },
+            { 'buyer.status': { $ne: 'Replied' } },
+            { 'buyer.followup_status': { $ne: 'Stopped' } }
+          ]
+        }
+      },
+      { $count: 'count' }
+    ]);
 
-    // Fetch daily activity for the last 7 days
-    const dailyActivity = await dbQuery(`
-      SELECT date(sent_at) as date, COUNT(*) as count 
-      FROM sent_history 
-      WHERE status = 'Success' 
-      GROUP BY date(sent_at) 
-      ORDER BY date(sent_at) ASC 
-      LIMIT 7
-    `);
+    const pendingFollowupsCount = pendingFollowupsRes[0] ? pendingFollowupsRes[0].count : 0;
+
+    // Fetch daily activity for the last 7 days (grouping by date part of sent_at ISO string)
+    const dailyActivity = await SentHistory.aggregate([
+      { $match: { status: 'Success' } },
+      {
+        $group: {
+          _id: { $substr: ['$sent_at', 0, 10] },
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          date: '$_id',
+          count: 1
+        }
+      },
+      { $sort: { date: 1 } },
+      { $limit: 7 }
+    ]);
 
     res.json({
-      totalBuyers: totalBuyers.count,
-      totalSent: totalSent.count,
-      totalFailed: totalFailed.count,
-      pendingPrimary: pendingPrimary.count,
-      pendingFollowups: pendingFollowups.count,
+      totalBuyers,
+      totalSent,
+      totalFailed,
+      pendingPrimary,
+      pendingFollowups: pendingFollowupsCount,
       dailyActivity: dailyActivity || []
     });
   } catch (error) {
@@ -51,26 +81,24 @@ router.get('/stats', async (req, res) => {
 router.get('/', async (req, res) => {
   const { search, status, type } = req.query;
 
-  let query = 'SELECT * FROM sent_history WHERE 1=1';
-  const params = [];
+  const filter = {};
 
   if (search) {
-    query += ' AND (company_name LIKE ? OR email_address LIKE ? OR subject LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    filter.$or = [
+      { company_name: { $regex: search, $options: 'i' } },
+      { email_address: { $regex: search, $options: 'i' } },
+      { subject: { $regex: search, $options: 'i' } }
+    ];
   }
   if (status) {
-    query += ' AND status = ?';
-    params.push(status);
+    filter.status = status;
   }
   if (type) {
-    query += ' AND type = ?';
-    params.push(type);
+    filter.type = type;
   }
 
-  query += ' ORDER BY sent_at DESC';
-
   try {
-    const history = await dbQuery(query, params);
+    const history = await SentHistory.find(filter).sort({ sent_at: -1 });
     res.json(history);
   } catch (error) {
     console.error('Error fetching sent history:', error);
@@ -81,7 +109,7 @@ router.get('/', async (req, res) => {
 // 2. Clear all sent history logs
 router.delete('/clear', async (req, res) => {
   try {
-    await dbRun('DELETE FROM sent_history');
+    await SentHistory.deleteMany({});
     res.json({ message: 'Sent history cleared successfully.' });
   } catch (error) {
     console.error('Error clearing sent history:', error);

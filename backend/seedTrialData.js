@@ -1,28 +1,11 @@
-import sqlite3 from 'sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, 'database.sqlite');
-
-const db = new sqlite3.Database(dbPath);
-
-const dbRun = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve({ id: this.lastID });
-    });
-  });
-};
+import mongoose, { initDatabase, Template, Buyer, Setting } from './database.js';
 
 const seed = async () => {
   console.log('Seeding trial database with sample outreach data...');
   
   try {
-    // Enable foreign keys
-    await dbRun('PRAGMA foreign_keys = ON');
+    // Connect to database
+    await initDatabase();
 
     // 1. Insert sample template
     const templateName = 'Ve Veyron - Spice Wholesalers Outreach';
@@ -49,33 +32,54 @@ Regards,
 Ugam
 Ve Veyron Exports`;
 
-    const templateResult = await dbRun(`
-      INSERT INTO templates (name, subject, body, created_at)
-      VALUES (?, ?, ?, ?)
-    `, [templateName, templateSubject, templateBody, new Date().toISOString()]);
-    console.log(`Sample template seeded. ID: ${templateResult.id}`);
+    // Clear existing templates if any
+    await Template.deleteMany({ name: templateName });
 
-    // Set as default follow-up templates placeholders too
-    await dbRun("UPDATE settings SET value = ? WHERE key = 'followup_1_template_id'", [templateResult.id]);
-    await dbRun("UPDATE settings SET value = ? WHERE key = 'followup_2_template_id'", [templateResult.id]);
+    const templateResult = await Template.create({
+      name: templateName,
+      subject: templateSubject,
+      body: templateBody,
+      created_at: new Date().toISOString()
+    });
+    console.log(`Sample template seeded. ID: ${templateResult._id}`);
 
-    // 2. Insert sample buyers (using the ones from your example)
+    // Set as default follow-up templates placeholders in settings
+    await Setting.findOneAndUpdate(
+      { key: 'followup_1_template_id' },
+      { value: templateResult._id.toString() },
+      { upsert: true }
+    );
+    await Setting.findOneAndUpdate(
+      { key: 'followup_2_template_id' },
+      { value: templateResult._id.toString() },
+      { upsert: true }
+    );
+    console.log('Follow-up templates configured in settings.');
+
+    // 2. Insert sample buyers
     const buyers = [
-      { name: 'ABC Foods', email: 'buyer@abcfoods.com', country: 'United States', interest: 'Turmeric Powder, Cumin Powder' },
-      { name: 'XYZ Trading', email: 'info@xyztrading.com', country: 'Germany', interest: 'Chilli Powder, Garlic Powder' },
-      { name: 'Global Spices Ltd', email: 'purchase@globalspices.com', country: 'United Kingdom', interest: 'Coriander Powder, Onion Powder' }
+      { company_name: 'ABC Foods', email: 'buyer@abcfoods.com', country: 'United States', product_interest: 'Turmeric Powder, Cumin Powder' },
+      { company_name: 'XYZ Trading', email: 'info@xyztrading.com', country: 'Germany', product_interest: 'Chilli Powder, Garlic Powder' },
+      { company_name: 'Global Spices Ltd', email: 'purchase@globalspices.com', country: 'United Kingdom', product_interest: 'Coriander Powder, Onion Powder' }
     ];
 
     for (const b of buyers) {
       try {
-        await dbRun(`
-          INSERT INTO buyers (company_name, email, country, website, product_interest, status, followup_status)
-          VALUES (?, ?, ?, ?, ?, 'Imported', 'None')
-        `, [b.name, b.email, b.country, `www.${b.name.toLowerCase().replace(/\s+/g, '')}.com`, b.interest]);
-        console.log(`Sample buyer seeded: ${b.name}`);
+        // Clear existing duplicate
+        await Buyer.deleteMany({ email: b.email });
+        
+        await Buyer.create({
+          company_name: b.company_name,
+          email: b.email,
+          country: b.country,
+          website: `www.${b.company_name.toLowerCase().replace(/\s+/g, '')}.com`,
+          product_interest: b.product_interest,
+          status: 'Imported',
+          followup_status: 'None'
+        });
+        console.log(`Sample buyer seeded: ${b.company_name}`);
       } catch (err) {
-        // Ignored if email already exists
-        console.log(`Buyer ${b.name} already exists, skipping.`);
+        console.log(`Error seeding buyer ${b.company_name}:`, err.message);
       }
     }
 
@@ -83,7 +87,8 @@ Ve Veyron Exports`;
   } catch (error) {
     console.error('Error seeding trial data:', error);
   } finally {
-    db.close();
+    await mongoose.connection.close();
+    console.log('Database connection closed.');
   }
 };
 

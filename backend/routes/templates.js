@@ -1,5 +1,5 @@
 import express from 'express';
-import { dbQuery, dbGet, dbRun } from '../database.js';
+import { Template, Setting } from '../database.js';
 import { authenticateToken } from './auth.js';
 
 const router = express.Router();
@@ -9,7 +9,7 @@ router.use(authenticateToken);
 // 1. Get all templates
 router.get('/', async (req, res) => {
   try {
-    const templates = await dbQuery('SELECT * FROM templates ORDER BY id DESC');
+    const templates = await Template.find().sort({ _id: -1 });
     res.json(templates);
   } catch (error) {
     console.error('Error fetching templates:', error);
@@ -21,7 +21,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const template = await dbGet('SELECT * FROM templates WHERE id = ?', [id]);
+    const template = await Template.findById(id);
     if (!template) {
       return res.status(404).json({ error: 'Template not found.' });
     }
@@ -43,11 +43,12 @@ router.post('/', async (req, res) => {
   const createdAt = new Date().toISOString();
 
   try {
-    const result = await dbRun(
-      'INSERT INTO templates (name, subject, body, created_at) VALUES (?, ?, ?, ?)',
-      [name, subject, body, createdAt]
-    );
-    const newTemplate = await dbGet('SELECT * FROM templates WHERE id = ?', [result.id]);
+    const newTemplate = await Template.create({
+      name,
+      subject,
+      body,
+      created_at: createdAt
+    });
     res.status(201).json(newTemplate);
   } catch (error) {
     console.error('Error creating template:', error);
@@ -65,17 +66,16 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    const template = await dbGet('SELECT * FROM templates WHERE id = ?', [id]);
+    const template = await Template.findById(id);
     if (!template) {
       return res.status(404).json({ error: 'Template not found.' });
     }
 
-    await dbRun(
-      'UPDATE templates SET name = ?, subject = ?, body = ? WHERE id = ?',
-      [name, subject, body, id]
+    const updated = await Template.findByIdAndUpdate(
+      id,
+      { name, subject, body },
+      { new: true }
     );
-
-    const updated = await dbGet('SELECT * FROM templates WHERE id = ?', [id]);
     res.json(updated);
   } catch (error) {
     console.error('Error updating template:', error);
@@ -88,8 +88,8 @@ router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   try {
     // Check if this template is referenced as a follow-up template in Settings
-    const f1Referenced = await dbGet("SELECT * FROM settings WHERE key = 'followup_1_template_id' AND value = ?", [id]);
-    const f2Referenced = await dbGet("SELECT * FROM settings WHERE key = 'followup_2_template_id' AND value = ?", [id]);
+    const f1Referenced = await Setting.findOne({ key: 'followup_1_template_id', value: id });
+    const f2Referenced = await Setting.findOne({ key: 'followup_2_template_id', value: id });
 
     if (f1Referenced || f2Referenced) {
       return res.status(400).json({
@@ -97,7 +97,7 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    await dbRun('DELETE FROM templates WHERE id = ?', [id]);
+    await Template.findByIdAndDelete(id);
     res.json({ message: 'Template deleted successfully.' });
   } catch (error) {
     console.error('Error deleting template:', error);

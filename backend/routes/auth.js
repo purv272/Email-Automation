@@ -1,7 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { dbGet } from '../database.js';
+import { User } from '../database.js';
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'veyron_exports_secret_key_2026';
@@ -33,7 +33,7 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const user = await dbGet('SELECT * FROM users WHERE username = ?', [username]);
+    const user = await User.findOne({ username });
 
     if (!user) {
       return res.status(400).json({ error: 'Invalid credentials.' });

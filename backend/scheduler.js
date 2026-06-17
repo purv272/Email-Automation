@@ -2,7 +2,7 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { dbGet, dbQuery, dbRun } from './database.js';
+import { Setting, Campaign, CampaignBuyer, Buyer, Template, SentHistory } from './database.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,7 +42,7 @@ export const verifySmtp = async (config) => {
 
 // Retrieve SMTP Transporter using latest database settings
 const getTransporter = async () => {
-  const settingsRows = await dbQuery('SELECT * FROM settings');
+  const settingsRows = await Setting.find();
   const config = {};
   settingsRows.forEach((row) => {
     config[row.key] = row.value;
@@ -109,34 +109,44 @@ export const processPendingEmails = async () => {
     while (hasMoreEmails) {
       // 1. PROCESS PRIMARY CAMPAIGN EMAILS
       // Find active campaigns
-      const activeCampaigns = await dbQuery("SELECT * FROM campaigns WHERE status = 'Sending'");
+      const activeCampaigns = await Campaign.find({ status: 'Sending' });
       let emailSentInThisIteration = false;
 
       for (const campaign of activeCampaigns) {
         // Find one pending buyer in this campaign
-        const pendingBuyer = await dbGet(`
-          SELECT cb.*, b.company_name, b.email, b.country, b.product_interest, b.status as buyer_status
-          FROM campaign_buyers cb
-          JOIN buyers b ON cb.buyer_id = b.id
-          WHERE cb.campaign_id = ? AND cb.status = 'Pending'
-          LIMIT 1
-        `, [campaign.id]);
+        const pendingBuyerCB = await CampaignBuyer.findOne({
+          campaign_id: campaign._id,
+          status: 'Pending'
+        }).populate('buyer_id');
 
-        if (pendingBuyer) {
+        if (pendingBuyerCB) {
+          const pendingBuyer = {
+            campaign_id: pendingBuyerCB.campaign_id,
+            buyer_id: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id._id : null,
+            status: pendingBuyerCB.status,
+            custom_subject: pendingBuyerCB.custom_subject,
+            custom_body: pendingBuyerCB.custom_body,
+            company_name: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id.company_name : 'Partner',
+            email: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id.email : '',
+            country: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id.country : '',
+            product_interest: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id.product_interest : '',
+            buyer_status: pendingBuyerCB.buyer_id ? pendingBuyerCB.buyer_id.status : ''
+          };
+
           // Send this email!
           await sendPrimaryEmail(campaign, pendingBuyer, transporter, senderEmail, signature, settings);
           emailSentInThisIteration = true;
           break; // Break campaign loop to sleep and check status again in next iteration
         } else {
           // No more pending buyers in this campaign. Check if all sent/failed
-          const incompleteBuyers = await dbGet(`
-            SELECT COUNT(*) as count FROM campaign_buyers 
-            WHERE campaign_id = ? AND status = 'Pending'
-          `, [campaign.id]);
+          const pendingCount = await CampaignBuyer.countDocuments({
+            campaign_id: campaign._id,
+            status: 'Pending'
+          });
 
-          if (incompleteBuyers.count === 0) {
+          if (pendingCount === 0) {
             // Mark campaign as completed
-            await dbRun("UPDATE campaigns SET status = 'Completed' WHERE id = ?", [campaign.id]);
+            await Campaign.findByIdAndUpdate(campaign._id, { status: 'Completed' });
             console.log(`Campaign "${campaign.name}" completed.`);
           }
         }
@@ -147,39 +157,113 @@ export const processPendingEmails = async () => {
         const nowIso = new Date().toISOString();
 
         // Check Follow-up 1
-        const pendingFollowup1 = await dbGet(`
-          SELECT cb.*, b.company_name, b.email, b.country, b.product_interest, b.status as buyer_status, c.name as campaign_name
-          FROM campaign_buyers cb
-          JOIN buyers b ON cb.buyer_id = b.id
-          JOIN campaigns c ON cb.campaign_id = c.id
-          WHERE cb.status = 'Sent' 
-            AND cb.followup_1_status = 'Pending' 
-            AND cb.followup_1_date <= ?
-            AND b.status != 'Replied' 
-            AND b.followup_status != 'Stopped'
-          LIMIT 1
-        `, [nowIso]);
+        const followup1Results = await CampaignBuyer.aggregate([
+          {
+            $match: {
+              status: 'Sent',
+              followup_1_status: 'Pending',
+              followup_1_date: { $lte: nowIso }
+            }
+          },
+          {
+            $lookup: {
+              from: 'buyers',
+              localField: 'buyer_id',
+              foreignField: '_id',
+              as: 'buyer'
+            }
+          },
+          { $unwind: '$buyer' },
+          {
+            $lookup: {
+              from: 'campaigns',
+              localField: 'campaign_id',
+              foreignField: '_id',
+              as: 'campaign'
+            }
+          },
+          { $unwind: '$campaign' },
+          {
+            $match: {
+              'buyer.status': { $ne: 'Replied' },
+              'buyer.followup_status': { $ne: 'Stopped' }
+            }
+          },
+          { $limit: 1 }
+        ]);
 
-        if (pendingFollowup1) {
+        if (followup1Results.length > 0) {
+          const doc = followup1Results[0];
+          const pendingFollowup1 = {
+            campaign_id: doc.campaign_id,
+            buyer_id: doc.buyer_id,
+            status: doc.status,
+            custom_subject: doc.custom_subject,
+            custom_body: doc.custom_body,
+            company_name: doc.buyer.company_name,
+            email: doc.buyer.email,
+            country: doc.buyer.country,
+            product_interest: doc.buyer.product_interest,
+            buyer_status: doc.buyer.status,
+            campaign_name: doc.campaign.name
+          };
+
           await sendFollowupEmail(1, pendingFollowup1, transporter, senderEmail, signature, settings);
           emailSentInThisIteration = true;
         } else {
           // Check Follow-up 2
-          const pendingFollowup2 = await dbGet(`
-            SELECT cb.*, b.company_name, b.email, b.country, b.product_interest, b.status as buyer_status, c.name as campaign_name
-            FROM campaign_buyers cb
-            JOIN buyers b ON cb.buyer_id = b.id
-            JOIN campaigns c ON cb.campaign_id = c.id
-            WHERE cb.status = 'Sent' 
-              AND cb.followup_1_status = 'Sent'
-              AND cb.followup_2_status = 'Pending' 
-              AND cb.followup_2_date <= ?
-              AND b.status != 'Replied' 
-              AND b.followup_status != 'Stopped'
-            LIMIT 1
-          `, [nowIso]);
+          const followup2Results = await CampaignBuyer.aggregate([
+            {
+              $match: {
+                status: 'Sent',
+                followup_1_status: 'Sent',
+                followup_2_status: 'Pending',
+                followup_2_date: { $lte: nowIso }
+              }
+            },
+            {
+              $lookup: {
+                from: 'buyers',
+                localField: 'buyer_id',
+                foreignField: '_id',
+                as: 'buyer'
+              }
+            },
+            { $unwind: '$buyer' },
+            {
+              $lookup: {
+                from: 'campaigns',
+                localField: 'campaign_id',
+                foreignField: '_id',
+                as: 'campaign'
+              }
+            },
+            { $unwind: '$campaign' },
+            {
+              $match: {
+                'buyer.status': { $ne: 'Replied' },
+                'buyer.followup_status': { $ne: 'Stopped' }
+              }
+            },
+            { $limit: 1 }
+          ]);
 
-          if (pendingFollowup2) {
+          if (followup2Results.length > 0) {
+            const doc = followup2Results[0];
+            const pendingFollowup2 = {
+              campaign_id: doc.campaign_id,
+              buyer_id: doc.buyer_id,
+              status: doc.status,
+              custom_subject: doc.custom_subject,
+              custom_body: doc.custom_body,
+              company_name: doc.buyer.company_name,
+              email: doc.buyer.email,
+              country: doc.buyer.country,
+              product_interest: doc.buyer.product_interest,
+              buyer_status: doc.buyer.status,
+              campaign_name: doc.campaign.name
+            };
+
             await sendFollowupEmail(2, pendingFollowup2, transporter, senderEmail, signature, settings);
             emailSentInThisIteration = true;
           }
@@ -210,7 +294,7 @@ const sendPrimaryEmail = async (campaign, cbBuyer, transporter, senderEmail, sig
 
   // Fallback to template if no customization is stored
   if (!subject || !body) {
-    const template = await dbGet('SELECT * FROM templates WHERE id = ?', [campaign.template_id]);
+    const template = await Template.findById(campaign.template_id);
     if (template) {
       subject = personalizeText(subject || template.subject, cbBuyer);
       body = personalizeText(body || template.body, cbBuyer);
@@ -228,7 +312,7 @@ const sendPrimaryEmail = async (campaign, cbBuyer, transporter, senderEmail, sig
   // Handle Attachments
   let attachmentPaths = [];
   try {
-    attachmentPaths = JSON.parse(campaign.attachments || '[]');
+    attachmentPaths = campaign.attachments || [];
   } catch (e) {
     attachmentPaths = [];
   }
@@ -261,32 +345,41 @@ const sendPrimaryEmail = async (campaign, cbBuyer, transporter, senderEmail, sig
     f2Date.setDate(f2Date.getDate() + delay2);
 
     // Update campaign buyer record
-    await dbRun(`
-      UPDATE campaign_buyers 
-      SET status = 'Sent', 
-          sent_at = ?, 
-          followup_1_date = ?, 
-          followup_1_status = 'Pending',
-          followup_2_date = ?, 
-          followup_2_status = 'Pending',
-          error_message = NULL
-      WHERE campaign_id = ? AND buyer_id = ?
-    `, [sentAt, f1Date.toISOString(), f2Date.toISOString(), cbBuyer.campaign_id, cbBuyer.buyer_id]);
+    await CampaignBuyer.findOneAndUpdate(
+      { campaign_id: cbBuyer.campaign_id, buyer_id: cbBuyer.buyer_id },
+      {
+        status: 'Sent',
+        sent_at: sentAt,
+        followup_1_date: f1Date.toISOString(),
+        followup_1_status: 'Pending',
+        followup_2_date: f2Date.toISOString(),
+        followup_2_status: 'Pending',
+        error_message: null
+      }
+    );
 
     // Update main buyer record
-    await dbRun(`
-      UPDATE buyers 
-      SET status = 'Emailed', 
-          date_sent = ?, 
-          followup_status = 'None'
-      WHERE id = ?
-    `, [sentAt, cbBuyer.buyer_id]);
+    await Buyer.findByIdAndUpdate(
+      cbBuyer.buyer_id,
+      {
+        status: 'Emailed',
+        date_sent: sentAt,
+        followup_status: 'None'
+      }
+    );
 
     // Add to Sent History audit log
-    await dbRun(`
-      INSERT INTO sent_history (buyer_id, campaign_id, email_address, company_name, subject, body, type, sent_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'Primary', ?, 'Success')
-    `, [cbBuyer.buyer_id, cbBuyer.campaign_id, cbBuyer.email, cbBuyer.company_name, subject, body, sentAt]);
+    await SentHistory.create({
+      buyer_id: cbBuyer.buyer_id,
+      campaign_id: cbBuyer.campaign_id,
+      email_address: cbBuyer.email,
+      company_name: cbBuyer.company_name,
+      subject: subject,
+      body: body,
+      type: 'Primary',
+      sent_at: sentAt,
+      status: 'Success'
+    });
 
     console.log(`Successfully sent primary email to ${cbBuyer.company_name} (${cbBuyer.email})`);
 
@@ -294,18 +387,24 @@ const sendPrimaryEmail = async (campaign, cbBuyer, transporter, senderEmail, sig
     console.error(`Failed to send primary email to ${cbBuyer.company_name}:`, error);
 
     // Record error in campaign buyer
-    await dbRun(`
-      UPDATE campaign_buyers 
-      SET status = 'Failed', 
-          error_message = ?
-      WHERE campaign_id = ? AND buyer_id = ?
-    `, [error.message, cbBuyer.campaign_id, cbBuyer.buyer_id]);
+    await CampaignBuyer.findOneAndUpdate(
+      { campaign_id: cbBuyer.campaign_id, buyer_id: cbBuyer.buyer_id },
+      { status: 'Failed', error_message: error.message }
+    );
 
     // Record history
-    await dbRun(`
-      INSERT INTO sent_history (buyer_id, campaign_id, email_address, company_name, subject, body, type, sent_at, status, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, 'Primary', ?, 'Failed', ?)
-    `, [cbBuyer.buyer_id, cbBuyer.campaign_id, cbBuyer.email, cbBuyer.company_name, subject, body, sentAt, error.message]);
+    await SentHistory.create({
+      buyer_id: cbBuyer.buyer_id,
+      campaign_id: cbBuyer.campaign_id,
+      email_address: cbBuyer.email,
+      company_name: cbBuyer.company_name,
+      subject: subject,
+      body: body,
+      type: 'Primary',
+      sent_at: sentAt,
+      status: 'Failed',
+      error_message: error.message
+    });
   }
 };
 
@@ -321,7 +420,7 @@ const sendFollowupEmail = async (num, cbBuyer, transporter, senderEmail, signatu
   let body = '';
 
   if (templateId) {
-    const template = await dbGet('SELECT * FROM templates WHERE id = ?', [templateId]);
+    const template = await Template.findById(templateId);
     if (template) {
       subject = personalizeText(template.subject, cbBuyer);
       body = personalizeText(template.body, cbBuyer);
@@ -357,24 +456,31 @@ const sendFollowupEmail = async (num, cbBuyer, transporter, senderEmail, signatu
     const buyerFollowupStatus = `Followup ${num} Sent`;
 
     // Update campaign buyer
-    await dbRun(`
-      UPDATE campaign_buyers 
-      SET ${statusField} = 'Sent'
-      WHERE campaign_id = ? AND buyer_id = ?
-    `, [cbBuyer.campaign_id, cbBuyer.buyer_id]);
+    const updateCB = {};
+    updateCB[statusField] = 'Sent';
+    await CampaignBuyer.findOneAndUpdate(
+      { campaign_id: cbBuyer.campaign_id, buyer_id: cbBuyer.buyer_id },
+      updateCB
+    );
 
     // Update main buyer status
-    await dbRun(`
-      UPDATE buyers 
-      SET followup_status = ?
-      WHERE id = ?
-    `, [buyerFollowupStatus, cbBuyer.buyer_id]);
+    await Buyer.findByIdAndUpdate(
+      cbBuyer.buyer_id,
+      { followup_status: buyerFollowupStatus }
+    );
 
     // Audit logs
-    await dbRun(`
-      INSERT INTO sent_history (buyer_id, campaign_id, email_address, company_name, subject, body, type, sent_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Success')
-    `, [cbBuyer.buyer_id, cbBuyer.campaign_id, cbBuyer.email, cbBuyer.company_name, subject, body, `Follow-up ${num}`, sentAt]);
+    await SentHistory.create({
+      buyer_id: cbBuyer.buyer_id,
+      campaign_id: cbBuyer.campaign_id,
+      email_address: cbBuyer.email,
+      company_name: cbBuyer.company_name,
+      subject: subject,
+      body: body,
+      type: `Follow-up ${num}`,
+      sent_at: sentAt,
+      status: 'Success'
+    });
 
     console.log(`Successfully sent Follow-up ${num} to ${cbBuyer.company_name} (${cbBuyer.email})`);
 
@@ -382,16 +488,25 @@ const sendFollowupEmail = async (num, cbBuyer, transporter, senderEmail, signatu
     console.error(`Failed to send Follow-up ${num} to ${cbBuyer.company_name}:`, error);
 
     const statusField = `followup_${num}_status`;
-    await dbRun(`
-      UPDATE campaign_buyers 
-      SET ${statusField} = 'Failed'
-      WHERE campaign_id = ? AND buyer_id = ?
-    `, [cbBuyer.campaign_id, cbBuyer.buyer_id]);
+    const updateCB = {};
+    updateCB[statusField] = 'Failed';
+    await CampaignBuyer.findOneAndUpdate(
+      { campaign_id: cbBuyer.campaign_id, buyer_id: cbBuyer.buyer_id },
+      updateCB
+    );
 
-    await dbRun(`
-      INSERT INTO sent_history (buyer_id, campaign_id, email_address, company_name, subject, body, type, sent_at, status, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Failed', ?)
-    `, [cbBuyer.buyer_id, cbBuyer.campaign_id, cbBuyer.email, cbBuyer.company_name, subject, body, `Follow-up ${num}`, sentAt, error.message]);
+    await SentHistory.create({
+      buyer_id: cbBuyer.buyer_id,
+      campaign_id: cbBuyer.campaign_id,
+      email_address: cbBuyer.email,
+      company_name: cbBuyer.company_name,
+      subject: subject,
+      body: body,
+      type: `Follow-up ${num}`,
+      sent_at: sentAt,
+      status: 'Failed',
+      error_message: error.message
+    });
   }
 };
 

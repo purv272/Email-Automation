@@ -1,9 +1,9 @@
 import { GoogleGenAI } from '@google/genai';
-import { dbGet } from './database.js';
+import { Setting } from './database.js';
 
 // Retrieve the Gemini API key from database settings
 async function getApiKey() {
-  const row = await dbGet('SELECT value FROM settings WHERE key = ?', ['gemini_api_key']);
+  const row = await Setting.findOne({ key: 'gemini_api_key' });
   return row ? row.value : '';
 }
 

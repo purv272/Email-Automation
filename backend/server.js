@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 
 // Import local services and database
 import { initDatabase } from './database.js';
-import { startScheduler } from './scheduler.js';
+import { startScheduler, processPendingEmails } from './scheduler.js';
 
 // Import API routers
 import authRouter from './routes/auth.js';
@@ -46,6 +46,18 @@ app.use('/api/history', historyRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/ai', aiRouter);
 
+// Endpoint to trigger scheduler manually (useful for serverless environments)
+app.post('/api/scheduler/process', async (req, res) => {
+  try {
+    console.log('Manual scheduler process triggered via API...');
+    await processPendingEmails();
+    res.json({ message: 'Scheduler run completed successfully.' });
+  } catch (error) {
+    console.error('Error running scheduler manually:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Serve Static Frontend Assets (Vite Production Build)
 const frontendBuildPath = path.join(__dirname, 'public');
 if (fs.existsSync(frontendBuildPath)) {
@@ -70,11 +82,16 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   console.log('Initializing system...');
   
-  // 1. Initialise SQLite Database
+  // 1. Initialise MongoDB Connection
   await initDatabase();
   
-  // 2. Start Background Email Scheduler Loop (checks queue every 60 seconds)
-  startScheduler(60000);
+  // 2. Start Background Email Scheduler Loop (checks queue every 60 seconds if persistent host)
+  // Only start scheduler if not running on serverless environment (e.g. VERCEL is not set)
+  if (!process.env.VERCEL) {
+    startScheduler(60000);
+  } else {
+    console.log('Running in serverless mode. Background scheduler loop disabled (use /api/scheduler/process to trigger).');
+  }
 
   // 3. Start server listener
   app.listen(PORT, () => {
