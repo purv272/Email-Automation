@@ -16,8 +16,8 @@ const getRandomToken = () => {
 };
 
 // Configure Multer for Excel/CSV file upload
-const uploadDir = 'uploads/temp';
-if (!fs.existsSync(uploadDir)) {
+const uploadDir = process.env.VERCEL ? '/tmp' : 'uploads/temp';
+if (uploadDir !== '/tmp' && !fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 

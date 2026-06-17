@@ -107,3 +107,5 @@ startServer().catch((error) => {
   console.error('System start failed:', error);
   process.exit(1);
 });
+
+export default app;

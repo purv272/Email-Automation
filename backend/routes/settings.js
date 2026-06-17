@@ -9,8 +9,8 @@ import { verifySmtp } from '../scheduler.js';
 const router = express.Router();
 
 // Configure Multer for attachments upload
-const attachmentsDir = 'uploads/attachments';
-if (!fs.existsSync(attachmentsDir)) {
+const attachmentsDir = process.env.VERCEL ? '/tmp' : 'uploads/attachments';
+if (attachmentsDir !== '/tmp' && !fs.existsSync(attachmentsDir)) {
   fs.mkdirSync(attachmentsDir, { recursive: true });
 }
 
